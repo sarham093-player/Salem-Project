@@ -1,0 +1,5 @@
+,model,recall,precision,f1,roc_auc,TP,FP,TN,FN,false_positive_rate,recall_ok,precision_ok,roc_auc_ok,fpr_ok
+Isolation Forest,Isolation Forest,1.0,1.0,1.0,,0,0,0,0,0.0,True,True,False,True
+LSTM Autoencoder,LSTM Autoencoder,1.0,1.0,1.0,,0,0,0,0,0.0,True,True,False,True
+XGBoost,XGBoost,1.0,1.0,1.0,,0,0,0,0,0.0,True,True,False,True
+Ensemble,Ensemble,1.0,1.0,1.0,,0,0,0,0,0.0,True,True,False,True
