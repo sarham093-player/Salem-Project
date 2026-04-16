@@ -982,14 +982,14 @@ def tab_rul(preds_df, rul_info):
 # ═════════════════════════════════════════════════════════════════════════════
 
 def tab_data_explorer(raw_df, sensor_summary, preds_df):
-    st.markdown("### 🗄️ Data Explorer & Augmentation Statistics")
+    st.markdown("###  Data Explorer & Augmentation Statistics")
 
     fault_class_names = load_fault_class_names()
 
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("#### 📊 Original Dataset")
+        st.markdown("####  Original Dataset")
         if raw_df is not None:
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Samples",   f"{len(raw_df):,}")
@@ -998,7 +998,7 @@ def tab_data_explorer(raw_df, sensor_summary, preds_df):
             c4.metric("Sample Interval", "15 min")
     
     with col2:
-        st.markdown("#### 🧬 Augmented Training Dataset")
+        st.markdown("####  Augmented Training Dataset")
         if preds_df is not None:
             fault_counts = preds_df["xgb_fault_class"].value_counts()
             total_windows = len(preds_df)
