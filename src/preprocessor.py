@@ -1,19 +1,4 @@
-"""
-preprocessor.py
----------------
-Steps 2–6 of the preprocessing pipeline:
-  2. Missing value treatment
-  3. Noise filtering (Butterworth + Kalman)
-  4. Normalisation (Min-Max, fit on normal phase only)
-  5. Phase segmentation and labeling
-  6. Sliding window extraction
 
-FIXES APPLIED:
-  ✅ Butterworth filter preserves NaN locations
-  ✅ Kalman smoother preserves NaN locations
-  ✅ Enhanced normalization logging and validation
-  ✅ Data range verification at each step
-"""
 
 import numpy as np
 import pandas as pd

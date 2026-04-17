@@ -1,430 +1,496 @@
 """
-preprocessor.py
----------------
-Steps 2–6 of the preprocessing pipeline:
-  2. Missing value treatment
-  3. Noise filtering (Butterworth + Kalman)
-  4. Normalisation (Min-Max, fit on normal phase only)
-  5. Phase segmentation and labeling
-  6. Sliding window extraction
+models.py
+---------
+Three ML models for the predictive maintenance ensemble.
 
-FIXES APPLIED:
-  ✅ Butterworth filter preserves NaN locations
-  ✅ Kalman smoother preserves NaN locations
-  ✅ Enhanced normalization logging and validation
-  ✅ Data range verification at each step
+ENHANCED VERSION with improved logging for debugging.
 """
 
 import numpy as np
 import pandas as pd
 import joblib
 import logging
+import os
 from pathlib import Path
-from scipy.signal import butter, filtfilt
-from sklearn.preprocessing import MinMaxScaler
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+from sklearn.ensemble import IsolationForest
+from sklearn.metrics import (
+    recall_score, precision_score, roc_auc_score, f1_score,
+    confusion_matrix, classification_report
+)
+from imblearn.over_sampling import SMOTE
+import xgboost as xgb
 
 from config import (
-    DATE_COLUMN, FAULT_LABEL_START, NORMAL_PHASE_END,
-    VIBRATION_SENSORS, TEMPERATURE_SENSORS, ALL_SENSORS,
-    WINDOW_SIZE, WINDOW_STEP, SHUTDOWN_VIB_THRESHOLD,
-    MAX_INTERP_GAP, BUTTERWORTH_ORDER, BUTTERWORTH_CUTOFF_HZ,
-    FAULT_TEMP_THRESHOLD, FAULT_TEMP_SENSOR, MODELS_DIR,
+    RANDOM_SEED, IF_CONTAMINATION, IF_N_ESTIMATORS, IF_MAX_SAMPLES,
+    LSTM_EPOCHS, LSTM_BATCH_SIZE, LSTM_LEARNING_RATE, LSTM_LATENT_DIM,
+    LSTM_THRESHOLD_PERCENTILE,
+    XGB_N_ESTIMATORS, XGB_MAX_DEPTH, XGB_LEARNING_RATE,
+    XGB_SUBSAMPLE, XGB_COLSAMPLE_BYTREE,
+    SMOTE_RANDOM_STATE, MODELS_DIR,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 2 — Missing Value Treatment
-# ─────────────────────────────────────────────────────────────────────────────
-
-def handle_missing_values(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Linear interpolation for gaps ≤ MAX_INTERP_GAP consecutive NaNs.
-    Longer gaps are left as NaN and will be excluded during windowing.
-    """
-    df = df.copy()
-    total_before = df[ALL_SENSORS].isnull().sum().sum()
-
-    for col in ALL_SENSORS:
-        # Count consecutive NaN runs
-        is_null   = df[col].isnull()
-        null_runs = is_null.groupby((is_null != is_null.shift()).cumsum()).transform("sum")
-
-        # Only interpolate short runs
-        mask = is_null & (null_runs <= MAX_INTERP_GAP)
-        df.loc[mask, col] = np.nan  # keep as NaN temporarily
-        df[col] = df[col].interpolate(method="linear", limit=MAX_INTERP_GAP)
-
-    total_after = df[ALL_SENSORS].isnull().sum().sum()
-    filled = total_before - total_after
-    logger.info(f"Missing values: {total_before} → {total_after} "
-                f"({filled} filled by interpolation, {total_after} remain as NaN)")
-    return df
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 3 — Noise Filtering (FIXED)
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# Model 1 — Isolation Forest
+# ═════════════════════════════════════════════════════════════════════════════
 
-def _butterworth_lowpass(signal: np.ndarray, cutoff: float, order: int) -> np.ndarray:
-    """
-    Apply zero-phase Butterworth low-pass filter. Handles NaNs by skipping.
-    
-    FIXED: Now preserves NaN locations after filtering.
-    """
-    if np.all(np.isnan(signal)):
-        return signal
-    
-    # ✅ PRESERVE NaN LOCATIONS
-    nan_mask = np.isnan(signal)
-    
-    b, a = butter(order, cutoff, btype="low", analog=False)
-    
-    # Fill NaN for filtering
-    s = pd.Series(signal).ffill().bfill().values
-    filtered = filtfilt(b, a, s)
-    
-    # ✅ RESTORE NaN LOCATIONS
-    filtered[nan_mask] = np.nan
-    
-    return filtered
+class IsolationForestModel:
+    """Unsupervised anomaly detection."""
 
+    def __init__(self):
+        self.model = IsolationForest(
+            n_estimators=IF_N_ESTIMATORS,
+            contamination=IF_CONTAMINATION,
+            max_samples=IF_MAX_SAMPLES,
+            random_state=RANDOM_SEED,
+            n_jobs=-1,
+        )
+        self._fitted = False
 
-def _kalman_smooth(signal: np.ndarray) -> np.ndarray:
-    """
-    Simple 1D Kalman smoother for temperature drift removal.
-    Models signal as a random walk with observation noise.
-    
-    FIXED: Now preserves NaN locations after smoothing.
-    """
-    if np.all(np.isnan(signal)):
-        return signal
+    def fit(self, X_normal_flat: np.ndarray) -> "IsolationForestModel":
+        logger.info(f"Fitting Isolation Forest on {len(X_normal_flat):,} normal windows...")
+        self.model.fit(X_normal_flat)
+        self._fitted = True
+        logger.info("Isolation Forest fitted.")
+        return self
 
-    # ✅ PRESERVE NaN LOCATIONS
-    nan_mask = np.isnan(signal)
-    
-    n = len(signal)
-    smoothed = np.zeros(n)
+    def score(self, X_flat: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            raise RuntimeError("Model not fitted. Call .fit() first.")
+        raw = self.model.decision_function(X_flat)
+        normalised = 1.0 - (raw - raw.min()) / (raw.max() - raw.min() + 1e-10)
+        return normalised.astype(np.float32)
 
-    # Fill NaN before Kalman
-    s = pd.Series(signal).ffill().bfill().values
+    def predict(self, X_flat: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            raise RuntimeError("Model not fitted. Call .fit() first.")
+        raw = self.model.predict(X_flat)
+        return ((raw == -1).astype(np.int32))
 
-    # Kalman parameters — tuned for slow temperature drift
-    Q = 1e-5   # process noise
-    R = 0.5    # observation noise
-    P = 1.0    # initial estimate error
-    x = s[0]   # initial state
+    def save(self, path: Path = MODELS_DIR / "isolation_forest.pkl"):
+        joblib.dump(self.model, path)
+        logger.info(f"Isolation Forest saved → {path}")
 
-    for i in range(n):
-        # Predict
-        P += Q
-        # Update
-        K = P / (P + R)
-        x = x + K * (s[i] - x)
-        P = (1 - K) * P
-        smoothed[i] = x
-
-    # ✅ RESTORE NaN LOCATIONS
-    smoothed[nan_mask] = np.nan
-    
-    return smoothed
+    def load(self, path: Path = MODELS_DIR / "isolation_forest.pkl"):
+        self.model = joblib.load(path)
+        self._fitted = True
+        logger.info(f"Isolation Forest loaded ← {path}")
+        return self
 
 
-def apply_noise_filtering(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply Butterworth low-pass filter to vibration sensors.
-    Apply Kalman smoother to temperature sensors.
-    """
-    df = df.copy()
-    logger.info("Applying noise filtering...")
+# ═════════════════════════════════════════════════════════════════════════════
+# Model 2 — LSTM Autoencoder (ENHANCED LOGGING)
+# ═════════════════════════════════════════════════════════════════════════════
 
-    for col in VIBRATION_SENSORS:
-        if col in df.columns:
-            df[col] = _butterworth_lowpass(
-                df[col].values, BUTTERWORTH_CUTOFF_HZ, BUTTERWORTH_ORDER
+class LSTMAutoencoder:
+    """LSTM Autoencoder for temporal pattern learning."""
+
+    def __init__(self, window_size: int, n_features: int):
+        self.window_size = window_size
+        self.n_features  = n_features
+        self.model       = None
+        self.threshold   = None
+        self._build()
+
+    def _build(self):
+        try:
+            import tensorflow as tf
+            from tensorflow.keras.models import Model
+            from tensorflow.keras.layers import (
+                Input, LSTM, Dense, RepeatVector, TimeDistributed, Dropout
             )
+            from tensorflow.keras.optimizers import Adam
 
-    for col in TEMPERATURE_SENSORS:
-        if col in df.columns:
-            df[col] = _kalman_smooth(df[col].values)
+            tf.random.set_seed(RANDOM_SEED)
 
-    logger.info("Noise filtering complete — Butterworth (vibration) + Kalman (temperature)")
-    return df
+            inp = Input(shape=(self.window_size, self.n_features))
 
+            # Encoder
+            x = LSTM(64, return_sequences=True, name="enc_lstm1")(inp)
+            x = Dropout(0.1)(x)
+            x = LSTM(32, return_sequences=False, name="enc_lstm2")(x)
+            x = Dense(LSTM_LATENT_DIM, activation="relu", name="latent")(x)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 4 — Normalisation (ENHANCED LOGGING)
-# ─────────────────────────────────────────────────────────────────────────────
+            # Decoder
+            x = RepeatVector(self.window_size)(x)
+            x = LSTM(32, return_sequences=True, name="dec_lstm1")(x)
+            x = Dropout(0.1)(x)
+            x = LSTM(64, return_sequences=True, name="dec_lstm2")(x)
+            out = TimeDistributed(Dense(self.n_features), name="reconstruction")(x)
 
-def fit_scaler(df: pd.DataFrame) -> MinMaxScaler:
-    """
-    Fit Min-Max scaler on normal phase data ONLY.
-    This prevents fault-phase statistics from contaminating normalisation.
-    """
-    normal_df = df[df[DATE_COLUMN] <= NORMAL_PHASE_END][ALL_SENSORS].dropna()
-    
-    if len(normal_df) == 0:
-        logger.error("❌ ERROR: No normal-phase data found for scaler fitting!")
-        logger.error(f"   Check NORMAL_PHASE_END date: {NORMAL_PHASE_END}")
-        raise ValueError("Cannot fit scaler: no normal data")
-    
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaler.fit(normal_df)
+            self.model = Model(inputs=inp, outputs=out, name="LSTM_Autoencoder")
+            self.model.compile(
+                optimizer=Adam(learning_rate=LSTM_LEARNING_RATE),
+                loss="mse"
+            )
+            logger.info(f"LSTM Autoencoder built — "
+                        f"Input: ({self.window_size}, {self.n_features}), "
+                        f"Latent dim: {LSTM_LATENT_DIM}")
+        except ImportError:
+            logger.error("TensorFlow not installed. Install with: pip install tensorflow")
+            raise
 
-    # ✅ LOG SCALER STATISTICS
-    logger.info(f"Scaler fitted on {len(normal_df):,} normal-phase rows")
-    logger.info(f"Scaler data_min (first 5 sensors): {scaler.data_min_[:5]}")
-    logger.info(f"Scaler data_max (first 5 sensors): {scaler.data_max_[:5]}")
+    def fit(self, X_normal: np.ndarray, X_val: np.ndarray = None) -> "LSTMAutoencoder":
+        import tensorflow as tf
+        from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
-    # Save scaler for dashboard use
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(scaler, MODELS_DIR / "scaler.pkl")
-    logger.info(f"Scaler saved → {MODELS_DIR / 'scaler.pkl'}")
-    
-    return scaler
-
-
-def apply_normalisation(df: pd.DataFrame, scaler: MinMaxScaler) -> pd.DataFrame:
-    """
-    Apply saved scaler to all data. NaN rows are kept as NaN.
-    
-    ENHANCED: Now logs normalization statistics and validates output.
-    """
-    df = df.copy()
-    non_null_mask = df[ALL_SENSORS].notna().all(axis=1)
-    
-    # ✅ LOG HOW MANY ROWS WILL BE NORMALIZED
-    n_to_normalize = non_null_mask.sum()
-    n_total = len(df)
-    logger.info(f"Normalizing {n_to_normalize:,} / {n_total:,} rows "
-                f"({n_to_normalize/n_total*100:.1f}% of data)")
-    
-    if n_to_normalize == 0:
-        logger.error("❌ ERROR: No complete rows to normalize!")
-        logger.error("   All rows have at least one NaN sensor")
-        raise ValueError("Cannot normalize: all rows have NaN")
-    
-    # Apply normalization
-    df.loc[non_null_mask, ALL_SENSORS] = scaler.transform(
-        df.loc[non_null_mask, ALL_SENSORS]
-    )
-    
-    # ✅ VERIFY NORMALIZATION WORKED
-    if non_null_mask.any():
-        normalized_values = df.loc[non_null_mask, ALL_SENSORS].values
-        min_val = normalized_values.min()
-        max_val = normalized_values.max()
-        mean_val = normalized_values.mean()
+        # ✅ VALIDATE INPUT DATA
+        logger.info(f"\n{'='*60}")
+        logger.info("LSTM TRAINING DATA VALIDATION")
+        logger.info(f"{'='*60}")
+        logger.info(f"X_normal shape: {X_normal.shape}")
+        logger.info(f"X_normal min:   {X_normal.min():.6f}")
+        logger.info(f"X_normal max:   {X_normal.max():.6f}")
+        logger.info(f"X_normal mean:  {X_normal.mean():.6f}")
         
-        logger.info(f"Normalized data range: [{min_val:.6f}, {max_val:.6f}]")
-        logger.info(f"Normalized data mean:  {mean_val:.6f}")
+        if X_normal.min() < -0.1 or X_normal.max() > 1.1:
+            logger.error("❌ CRITICAL ERROR: Training data NOT normalized!")
+            logger.error(f"   Expected: [0, 1]")
+            logger.error(f"   Actual:   [{X_normal.min():.4f}, {X_normal.max():.4f}]")
+            raise ValueError("Cannot train LSTM on non-normalized data")
         
-        # Validate range
-        if min_val < -0.1 or max_val > 1.1:
-            logger.error(f"❌ ERROR: Normalization failed!")
-            logger.error(f"   Values outside [0,1] range: [{min_val:.4f}, {max_val:.4f}]")
-            logger.error(f"   This will cause LSTM reconstruction errors to explode!")
-            raise ValueError("Normalization produced invalid range")
+        logger.info("✅ Training data validated")
+        logger.info(f"{'='*60}\n")
+
+        logger.info(f"Training LSTM Autoencoder on {len(X_normal):,} normal windows...")
+
+        callbacks = [
+            EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6),
+        ]
+
+        validation_data = (X_val, X_val) if X_val is not None else None
+
+        history = self.model.fit(
+            X_normal, X_normal,
+            epochs=LSTM_EPOCHS,
+            batch_size=LSTM_BATCH_SIZE,
+            validation_data=validation_data,
+            callbacks=callbacks,
+            verbose=1,  # ✅ Show training progress
+        )
+
+        # ✅ LOG TRAINING RESULTS
+        final_loss = history.history['loss'][-1]
+        logger.info(f"Final training loss: {final_loss:.6f}")
+        
+        if validation_data is not None:
+            final_val_loss = history.history['val_loss'][-1]
+            logger.info(f"Final validation loss: {final_val_loss:.6f}")
+
+        # Compute reconstruction errors on normal windows to set threshold
+        recon = self.model.predict(X_normal, verbose=0)
+        mse_normal = np.mean((X_normal - recon) ** 2, axis=(1, 2))
+        
+        # ✅ LOG ERROR DISTRIBUTION
+        logger.info(f"\nReconstruction error statistics (normal windows):")
+        logger.info(f"  Min:    {mse_normal.min():.6f}")
+        logger.info(f"  Max:    {mse_normal.max():.6f}")
+        logger.info(f"  Mean:   {mse_normal.mean():.6f}")
+        logger.info(f"  Median: {np.median(mse_normal):.6f}")
+        logger.info(f"  Std:    {mse_normal.std():.6f}")
+        
+        self.threshold = float(np.percentile(mse_normal, LSTM_THRESHOLD_PERCENTILE))
+        
+        logger.info(f"\nLSTM Autoencoder trained. Threshold set at "
+                    f"{LSTM_THRESHOLD_PERCENTILE}th percentile = {self.threshold:.6f}")
+        
+        # ✅ VALIDATE THRESHOLD
+        if self.threshold > 1.0:
+            logger.error(f"❌ WARNING: Threshold very high ({self.threshold:.4f})!")
+            logger.error("   This suggests training data was NOT normalized")
+            logger.error("   Expected threshold: 0.001 - 0.01")
+            logger.error("   Dashboard will show errors 30-50 instead of 0.001-0.01")
+        elif self.threshold < 0.0001:
+            logger.warning(f"⚠️  Threshold very low ({self.threshold:.6f})")
+            logger.warning("   Model may be too sensitive (high false positive rate)")
         else:
-            logger.info("✅ Normalization validated: data in [0, 1] range")
-    
-    logger.info("Min-Max normalisation applied (scaler fitted on normal phase only)")
-    return df
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 5 — Phase Segmentation & Labeling
-# ─────────────────────────────────────────────────────────────────────────────
-
-def assign_labels(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Assign binary health labels:
-      0 = Normal  (before 2026-02-28)
-      1 = Fault   (from 2026-02-28 onward)
-
-    Also adds:
-      shutdown_flag : 1 if avg vibration < SHUTDOWN_VIB_THRESHOLD (pump trip)
-      temp_anomaly  : TI0731 deviation from normal-phase baseline
-      days_from_fault_onset : RUL proxy (0 at fault onset, negative in normal phase)
-    """
-    df = df.copy()
-
-    # Primary label
-    df["label"] = 0
-    df.loc[df[DATE_COLUMN] >= FAULT_LABEL_START, "label"] = 1
-
-    # Shutdown flag — pump tripping indicator
-    vib_cols_present = [c for c in VIBRATION_SENSORS if c in df.columns]
-    df["avg_vibration"] = df[vib_cols_present].mean(axis=1)
-    df["shutdown_flag"] = (df["avg_vibration"] < SHUTDOWN_VIB_THRESHOLD).astype(int)
-
-    # Temperature anomaly — deviation of TI0731 from normal baseline
-    from config import NORMAL_BASELINE_TEMP
-    if FAULT_TEMP_SENSOR in df.columns:
-        df["temp_anomaly"] = df[FAULT_TEMP_SENSOR] - NORMAL_BASELINE_TEMP
-
-    # Days from fault onset (negative = before fault, positive = after)
-    fault_onset = pd.Timestamp(FAULT_LABEL_START)
-    df["days_from_fault_onset"] = (df[DATE_COLUMN] - fault_onset).dt.total_seconds() / 86400
-
-    normal_count = (df["label"] == 0).sum()
-    fault_count  = (df["label"] == 1).sum()
-    shutdown_count = df["shutdown_flag"].sum()
-    logger.info(f"Labels assigned — Normal: {normal_count:,} | Fault: {fault_count:,} | "
-                f"Shutdown events: {shutdown_count:,}")
-
-    return df
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 6 — Sliding Window Extraction
-# ─────────────────────────────────────────────────────────────────────────────
-
-def extract_windows(
-    df: pd.DataFrame,
-    window_size: int = WINDOW_SIZE,
-    step: int = WINDOW_STEP,
-) -> tuple[np.ndarray, np.ndarray, list[pd.Timestamp]]:
-    """
-    Segment the normalised time-series into sliding windows.
-
-    Returns
-    -------
-    X          : (n_windows, window_size, n_sensors) float array
-    y          : (n_windows,) int array — majority label per window
-    timestamps : (n_windows,) list of window-end timestamps
-    """
-    sensor_cols = ALL_SENSORS
-    feature_matrix = df[sensor_cols].values  # (n_samples, 35)
-    labels_arr     = df["label"].values
-    timestamps_arr = df[DATE_COLUMN].values
-
-    X, y, ts = [], [], []
-    n = len(df)
-
-    for start in range(0, n - window_size + 1, step):
-        end    = start + window_size
-        window = feature_matrix[start:end, :]
-
-        # Skip windows with any NaN
-        if np.isnan(window).any():
-            continue
-
-        X.append(window)
-        # Majority label: fault if >50% of window readings are in fault phase
-        y.append(int(labels_arr[start:end].mean() > 0.5))
-        ts.append(pd.Timestamp(timestamps_arr[end - 1]))
-
-    X = np.array(X, dtype=np.float32)   # (n_windows, window_size, 35)
-    y = np.array(y, dtype=np.int32)
-
-    n_normal = (y == 0).sum()
-    n_fault  = (y == 1).sum()
-    logger.info(f"Windows extracted — Total: {len(X):,} | Normal: {n_normal} | Fault: {n_fault}")
-    logger.info(f"Window shape: {X.shape}  (windows × timesteps × sensors)")
-
-    return X, y, ts
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN PIPELINE (ENHANCED WITH VALIDATION)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_full_pipeline(raw_df: pd.DataFrame) -> dict:
-    """
-    Execute all 6 preprocessing steps and return a dictionary
-    with the processed data ready for model training.
-    
-    ENHANCED: Now includes data validation at each critical step.
-    """
-    logger.info("=" * 60)
-    logger.info("Starting full preprocessing pipeline")
-    logger.info("=" * 60)
-
-    # Step 2
-    df = handle_missing_values(raw_df)
-
-    # Step 3
-    df = apply_noise_filtering(df)
-
-    # Step 4 — fit scaler on normal, apply to all
-    scaler = fit_scaler(df)
-    df_norm = apply_normalisation(df, scaler)
-
-    # ✅ VALIDATE NORMALIZATION BEFORE PROCEEDING
-    logger.info("\n" + "="*60)
-    logger.info("VALIDATING NORMALIZED DATA")
-    logger.info("="*60)
-    
-    # Check a sample of normalized values
-    sample_data = df_norm[ALL_SENSORS].dropna().head(100)
-    if len(sample_data) > 0:
-        logger.info(f"Sample normalized data (first 100 rows):")
-        logger.info(f"  Min:  {sample_data.values.min():.6f}")
-        logger.info(f"  Max:  {sample_data.values.max():.6f}")
-        logger.info(f"  Mean: {sample_data.values.mean():.6f}")
+            logger.info(f"✅ Threshold in expected range (0.001 - 0.01)")
         
-        if sample_data.values.min() < -0.1 or sample_data.values.max() > 1.1:
-            logger.error("❌ CRITICAL ERROR: Normalized data outside [0,1] range!")
-            raise ValueError("Normalization validation failed")
-    logger.info("="*60 + "\n")
+        return self
 
-    # Step 5
-    df_labeled = assign_labels(df_norm)
+    def reconstruction_error(self, X: np.ndarray) -> np.ndarray:
+        """Return per-window MSE reconstruction error."""
+        if self.model is None:
+            raise RuntimeError("Model not built.")
+        recon = self.model.predict(X, verbose=0)
+        errors = np.mean((X - recon) ** 2, axis=(1, 2)).astype(np.float32)
+        
+        # ✅ LOG WARNING IF ERRORS ARE HUGE
+        if errors.mean() > 1.0:
+            logger.warning(f"⚠️  Reconstruction errors very high (mean={errors.mean():.4f})!")
+            logger.warning("   This suggests input data is NOT normalized")
+            logger.warning("   Dashboard will show incorrect LSTM Recon Error values")
+        
+        return errors
 
-    # Step 6
-    X, y, timestamps = extract_windows(df_labeled)
+    def score(self, X: np.ndarray) -> np.ndarray:
+        """Return normalised anomaly scores [0, 1]."""
+        errors = self.reconstruction_error(X)
+        return np.clip(errors / (self.threshold + 1e-10), 0, 1).astype(np.float32)
 
-    # ✅ FINAL VALIDATION OF WINDOW DATA
-    logger.info("\n" + "="*60)
-    logger.info("VALIDATING EXTRACTED WINDOWS")
-    logger.info("="*60)
-    logger.info(f"Window array shape: {X.shape}")
-    logger.info(f"Window data type:   {X.dtype}")
-    logger.info(f"Window min value:   {X.min():.6f}")
-    logger.info(f"Window max value:   {X.max():.6f}")
-    logger.info(f"Window mean value:  {X.mean():.6f}")
-    logger.info(f"Window std value:   {X.std():.6f}")
-    logger.info(f"NaN count in windows: {np.isnan(X).sum()}")
-    
-    if X.min() < -0.1 or X.max() > 1.1:
-        logger.error("❌ CRITICAL ERROR: Window data outside [0,1] range!")
-        logger.error("   This will cause LSTM errors to be ~10,000x too large!")
-        raise ValueError("Window validation failed")
-    
-    if np.isnan(X).any():
-        logger.error("❌ CRITICAL ERROR: NaN values in extracted windows!")
-        raise ValueError("Windows contain NaN values")
-    
-    logger.info("✅ All validations passed!")
-    logger.info("="*60 + "\n")
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Binary prediction: 1 = anomaly, 0 = normal."""
+        if self.threshold is None:
+            raise RuntimeError("Threshold not set. Train model first.")
+        errors = self.reconstruction_error(X)
+        return (errors > self.threshold).astype(np.int32)
 
-    # Train / Val / Test split by date (NO shuffle to prevent leakage)
-    n = len(X)
-    test_cut = int(n * 0.90)
-    val_cut  = int(n * 0.70)
+    def estimate_rul(self, error_series: np.ndarray, n_future: int = 20) -> dict:
+        """Estimate Remaining Useful Life from reconstruction error trend."""
+        if self.threshold is None:
+            return {"rul_windows": None, "trend_slope": None}
 
-    X_train, y_train = X[:val_cut],         y[:val_cut]
-    X_val,   y_val   = X[val_cut:test_cut], y[val_cut:test_cut]
-    X_test,  y_test  = X[test_cut:],        y[test_cut:]
-    ts_test          = timestamps[test_cut:]
+        x = np.arange(len(error_series))
+        slope, intercept = np.polyfit(x, error_series, 1)
 
-    logger.info(f"Split — Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
-    logger.info("Preprocessing pipeline complete.")
+        if slope <= 0:
+            return {"rul_windows": None, "trend_slope": float(slope), "message": "No degradation trend"}
 
-    return {
-        "df_processed":  df_labeled,
-        "scaler":        scaler,
-        "X_train":       X_train,
-        "y_train":       y_train,
-        "X_val":         X_val,
-        "y_val":         y_val,
-        "X_test":        X_test,
-        "y_test":        y_test,
-        "ts_test":       ts_test,
-        "X_all":         X,
-        "y_all":         y,
-        "ts_all":        timestamps,
+        critical = 2.0 * self.threshold
+        current_error = error_series[-1]
+
+        if current_error >= critical:
+            rul_windows = 0
+        else:
+            rul_windows = int((critical - current_error) / slope)
+
+        return {
+            "rul_windows":        rul_windows,
+            "trend_slope":        float(slope),
+            "current_error":      float(current_error),
+            "critical_threshold": float(critical),
+            "rul_hours":          rul_windows * (48 * 15 / 60),
+            "message":            f"Estimated RUL: {rul_windows} windows ({rul_windows * 12:.0f} hours)"
+        }
+
+    def save(self, dir_path: Path = MODELS_DIR):
+        dir_path.mkdir(parents=True, exist_ok=True)
+        self.model.save(dir_path / "lstm_autoencoder.keras")
+        joblib.dump(self.threshold, dir_path / "lstm_threshold.pkl")
+        logger.info(f"LSTM Autoencoder saved → {dir_path}")
+
+    def load(self, dir_path: Path = MODELS_DIR):
+        import tensorflow as tf
+        self.model = tf.keras.models.load_model(dir_path / "lstm_autoencoder.keras")
+        self.threshold = joblib.load(dir_path / "lstm_threshold.pkl")
+        logger.info(f"LSTM Autoencoder loaded ← {dir_path}")
+        logger.info(f"Loaded threshold: {self.threshold:.6f}")
+        return self
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Model 3 — XGBoost (UNCHANGED)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class XGBoostClassifier:
+    """Supervised MULTI-CLASS classifier."""
+
+    def __init__(self):
+        self.model        = None
+        self._fitted      = False
+        self.feature_names: list = []
+        self._n_classes   = 2
+        self._is_multiclass = False
+
+    def _build_model(self, n_classes: int):
+        if n_classes == 2:
+            self.model = xgb.XGBClassifier(
+                n_estimators=XGB_N_ESTIMATORS,
+                max_depth=XGB_MAX_DEPTH,
+                learning_rate=XGB_LEARNING_RATE,
+                subsample=XGB_SUBSAMPLE,
+                colsample_bytree=XGB_COLSAMPLE_BYTREE,
+                eval_metric="logloss",
+                random_state=RANDOM_SEED,
+                n_jobs=-1,
+            )
+            self._is_multiclass = False
+        else:
+            self.model = xgb.XGBClassifier(
+                n_estimators=XGB_N_ESTIMATORS,
+                max_depth=XGB_MAX_DEPTH,
+                learning_rate=XGB_LEARNING_RATE,
+                subsample=XGB_SUBSAMPLE,
+                colsample_bytree=XGB_COLSAMPLE_BYTREE,
+                objective="multi:softprob",
+                eval_metric="mlogloss",
+                num_class=n_classes,
+                random_state=RANDOM_SEED,
+                n_jobs=-1,
+            )
+            self._is_multiclass = True
+        self._n_classes = n_classes
+
+    def fit(self, X_flat: np.ndarray, y: np.ndarray,
+            feature_names: list = None) -> "XGBoostClassifier":
+        self.feature_names = feature_names or [f"f{i}" for i in range(X_flat.shape[1])]
+
+        unique_classes = np.unique(y)
+        n_classes = len(unique_classes)
+        self._build_model(n_classes)
+
+        logger.info(f"XGBoost mode: {'multi-class (' + str(n_classes) + ' classes)' if n_classes > 2 else 'binary'}")
+        logger.info(f"Class distribution before SMOTE: {dict(zip(*np.unique(y, return_counts=True)))}")
+
+        min_class_count = min(np.bincount(y[y >= 0]))
+        k_neighbors = min(5, min_class_count - 1) if min_class_count > 1 else 1
+
+        try:
+            smote = SMOTE(random_state=SMOTE_RANDOM_STATE, k_neighbors=k_neighbors)
+            X_res, y_res = smote.fit_resample(X_flat, y)
+            logger.info(f"After SMOTE: {dict(zip(*np.unique(y_res, return_counts=True)))}")
+        except Exception as e:
+            logger.warning(f"SMOTE failed ({e}). Training without oversampling.")
+            X_res, y_res = X_flat, y
+
+        logger.info(f"Training XGBoost on {len(X_res):,} windows ({n_classes} classes)...")
+        self.model.fit(X_res, y_res, verbose=False)
+        self._fitted = True
+        logger.info("XGBoost training complete.")
+        return self
+
+    def predict(self, X_flat: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            raise RuntimeError("Model not fitted.")
+        return self.model.predict(X_flat).astype(np.int32)
+
+    def predict_binary(self, X_flat: np.ndarray) -> np.ndarray:
+        preds = self.predict(X_flat)
+        return (preds > 0).astype(np.int32)
+
+    def score(self, X_flat: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            raise RuntimeError("Model not fitted.")
+        proba = self.model.predict_proba(X_flat)
+        return (1.0 - proba[:, 0]).astype(np.float32)
+
+    def predict_proba_all(self, X_flat: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            raise RuntimeError("Model not fitted.")
+        return self.model.predict_proba(X_flat).astype(np.float32)
+
+    def feature_importance_df(self) -> pd.DataFrame:
+        importances = self.model.feature_importances_
+        return (
+            pd.DataFrame({"feature": self.feature_names, "importance": importances})
+            .sort_values("importance", ascending=False)
+            .reset_index(drop=True)
+        )
+
+    def save(self, path: Path = MODELS_DIR / "xgboost.pkl"):
+        joblib.dump({
+            "model": self.model,
+            "feature_names": self.feature_names,
+            "n_classes": self._n_classes,
+            "is_multiclass": self._is_multiclass,
+        }, path)
+        logger.info(f"XGBoost saved → {path}")
+
+    def load(self, path: Path = MODELS_DIR / "xgboost.pkl"):
+        data = joblib.load(path)
+        self.model = data["model"]
+        self.feature_names   = data.get("feature_names", [])
+        self._n_classes      = data.get("n_classes", 2)
+        self._is_multiclass  = data.get("is_multiclass", False)
+        self._fitted = True
+        logger.info(f"XGBoost loaded ← {path}")
+        return self
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Ensemble & Evaluation (UNCHANGED)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class PdMEnsemble:
+    """2-of-3 voting ensemble."""
+
+    def __init__(self, if_model, lstm_model, xgb_model):
+        self.if_model   = if_model
+        self.lstm_model = lstm_model
+        self.xgb_model  = xgb_model
+
+    def predict(self, X_windows: np.ndarray, X_flat: np.ndarray) -> dict:
+        from config import ENSEMBLE_MIN_VOTES
+
+        X_windows_flat = X_windows.reshape(len(X_windows), -1)
+
+        if_preds  = self.if_model.predict(X_windows_flat)
+        if_scores = self.if_model.score(X_windows_flat)
+
+        lstm_preds  = self.lstm_model.predict(X_windows)
+        lstm_scores = self.lstm_model.score(X_windows)
+
+        xgb_class_preds = self.xgb_model.predict(X_flat)
+        xgb_preds       = self.xgb_model.predict_binary(X_flat)
+        xgb_scores      = self.xgb_model.score(X_flat)
+
+        vote_matrix = np.stack([if_preds, lstm_preds, xgb_preds], axis=1)
+        total_votes = vote_matrix.sum(axis=1)
+        ensemble_preds = (total_votes >= ENSEMBLE_MIN_VOTES).astype(np.int32)
+
+        ensemble_scores = (if_scores + lstm_scores + xgb_scores) / 3.0
+
+        return {
+            "ensemble_preds":   ensemble_preds,
+            "ensemble_scores":  ensemble_scores,
+            "if_preds":         if_preds,
+            "if_scores":        if_scores,
+            "lstm_preds":       lstm_preds,
+            "lstm_scores":      lstm_scores,
+            "xgb_class_preds":  xgb_class_preds,
+            "xgb_preds":        xgb_preds,
+            "xgb_scores":       xgb_scores,
+            "vote_counts":      total_votes,
+        }
+
+
+def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray,
+                   y_score: np.ndarray = None, model_name: str = "") -> dict:
+    from config import TARGET_RECALL, TARGET_PRECISION, TARGET_ROC_AUC, TARGET_MAX_FPR
+
+    y_pred_binary  = (y_pred  > 0).astype(np.int32)
+    y_true_binary  = (y_true  > 0).astype(np.int32)
+
+    metrics = {
+        "model":     model_name,
+        "recall":    round(recall_score(y_true_binary, y_pred_binary, zero_division=0), 4),
+        "precision": round(precision_score(y_true_binary, y_pred_binary, zero_division=0), 4),
+        "f1":        round(f1_score(y_true_binary, y_pred_binary, zero_division=0), 4),
     }
+
+    if y_score is not None and len(np.unique(y_true_binary)) > 1:
+        metrics["roc_auc"] = round(roc_auc_score(y_true_binary, y_score), 4)
+    else:
+        metrics["roc_auc"] = None
+
+    if len(np.unique(y_true_binary)) > 1:
+        tn, fp, fn, tp = confusion_matrix(y_true_binary, y_pred_binary, labels=[0, 1]).ravel()
+    else:
+        tn = fp = fn = tp = 0
+
+    metrics.update({
+        "TP": int(tp), "FP": int(fp), "TN": int(tn), "FN": int(fn),
+        "false_positive_rate": round(fp / max(fp + tn, 1), 4),
+    })
+
+    metrics["recall_ok"]    = metrics["recall"]    >= TARGET_RECALL
+    metrics["precision_ok"] = metrics["precision"] >= TARGET_PRECISION
+    metrics["roc_auc_ok"]   = (metrics["roc_auc"] or 0) >= TARGET_ROC_AUC
+    metrics["fpr_ok"]       = metrics["false_positive_rate"] <= TARGET_MAX_FPR
+
+    logger.info(f"\n{'='*50}\n{model_name} Evaluation")
+    logger.info(f"Recall:    {metrics['recall']:.4f}  (target ≥{TARGET_RECALL}) {'✓' if metrics['recall_ok'] else '✗'}")
+    logger.info(f"Precision: {metrics['precision']:.4f}  (target ≥{TARGET_PRECISION}) {'✓' if metrics['precision_ok'] else '✗'}")
+    logger.info(f"ROC-AUC:   {metrics.get('roc_auc','N/A')}  (target ≥{TARGET_ROC_AUC})")
+    logger.info(f"FPR:       {metrics['false_positive_rate']:.4f}  (target ≤{TARGET_MAX_FPR})")
+
+    return metrics
