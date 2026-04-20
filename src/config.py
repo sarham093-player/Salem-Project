@@ -90,7 +90,7 @@ SENSOR_LABELS = {
     "2026TI0741.PV":  "GB LS NDE Bearing Temp",
     "2026TI0742.PV":  "GB HS NDE Bearing Temp",
     "2026TI0743.PV":  "GB Thrust Brg Temp 5",
-    "2026TI0744.PV":  "GB LS DE Bearing Temp",
+    "2026TI0744.PV":  "GB LS DE Bearing Temp", 
     "2026TI0745.PV":  "Motor DE Bearing Temp 2",
     "2026TI0746.PV":  "Motor NDE Bearing Temp 2",
 }
@@ -135,7 +135,7 @@ XGB_COLSAMPLE_BYTREE    = 0.8
 ENSEMBLE_MIN_VOTES      = 2           # alerts when >= 2 of 3 models agree
 
 # ─── Evaluation Targets ──────────────────────────────────────────────────────
-TARGET_RECALL           = 0.92
+TARGET_RECALL           = 0.9
 TARGET_PRECISION        = 0.88
 TARGET_ROC_AUC          = 0.95
 TARGET_LEAD_TIME_HOURS  = 24

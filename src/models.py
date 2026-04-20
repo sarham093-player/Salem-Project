@@ -455,7 +455,7 @@ class PdMEnsemble:
 
 def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray,
                    y_score: np.ndarray = None, model_name: str = "") -> dict:
-    from config import TARGET_RECALL, TARGET_PRECISION, TARGET_ROC_AUC, TARGET_MAX_FPR
+    from config import TARGET_RECALL, TARGET_PRECISION, TARGET_ROC_AUC, TARGET_MAX_FPR 
 
     y_pred_binary  = (y_pred  > 0).astype(np.int32)
     y_true_binary  = (y_true  > 0).astype(np.int32)

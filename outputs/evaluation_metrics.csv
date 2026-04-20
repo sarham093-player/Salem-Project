@@ -1,5 +1,5 @@
-,model,recall,precision,f1,roc_auc,TP,FP,TN,FN,false_positive_rate,recall_ok,precision_ok,roc_auc_ok,fpr_ok
-Isolation Forest,Isolation Forest,1.0,1.0,1.0,,0,0,0,0,0.0,True,True,False,True
-LSTM Autoencoder,LSTM Autoencoder,1.0,1.0,1.0,,0,0,0,0,0.0,True,True,False,True
-XGBoost,XGBoost,1.0,1.0,1.0,,0,0,0,0,0.0,True,True,False,True
-Ensemble,Ensemble,1.0,1.0,1.0,,0,0,0,0,0.0,True,True,False,True
+,recall,precision,f1,roc_auc,false_positive_rate,TP,FP,TN,FN
+Isolation Forest,0.7948717948717948,0.9234042553191489,0.8543307086614174,0.9054881899709486,0.15517241379296967,217.0,18.0,98.0,56.0
+LSTM Autoencoder,0.007326007326007326,1.0,0.014545454545454545,0.9591385625868384,0.0,2.0,0.0,116.0,271.0
+XGBoost,0.9047619047619048,1.0,0.95,1.0,0.0,247.0,0.0,116.0,26.0
+Ensemble,0.7032967032967034,1.0,0.8258064516129032,0.9961159530125047,0.0,192.0,0.0,116.0,81.0

@@ -271,7 +271,7 @@ def extract_windows(
     df: pd.DataFrame,
     window_size: int = WINDOW_SIZE,
     step: int = WINDOW_STEP,
-) -> tuple[np.ndarray, np.ndarray, list[pd.Timestamp]]:
+) -> tuple[np.ndarray, np.ndarray, list[pd.Timestamp]]: 
     """
     Segment the normalised time-series into sliding windows.
 
@@ -302,7 +302,7 @@ def extract_windows(
         y.append(int(labels_arr[start:end].mean() > 0.5))
         ts.append(pd.Timestamp(timestamps_arr[end - 1]))
 
-    X = np.array(X, dtype=np.float32)   # (n_windows, window_size, 35)
+    X = np.array(X, dtype=np.float32)   # (n_windows, window_size, 35)  
     y = np.array(y, dtype=np.int32)
 
     n_normal = (y == 0).sum()

@@ -1,8 +1,9 @@
 {
-  "rul_windows": 0,
-  "trend_slope": 0.5134442459224459,
-  "current_error": 47.03658676147461,
-  "critical_threshold": 0.8142406344413757,
   "rul_hours": 0.0,
-  "message": "Estimated RUL: 0 windows (0 hours)"
+  "rul_windows": 0,
+  "trend_slope": 0.021729283076688075,
+  "current_error": 1.5573655433373281,
+  "critical_threshold": 1.1909273071075839,
+  "baseline_error": 0.5954636535537919,
+  "message": "Error above critical threshold \u2014 immediate action required"
 }
