@@ -65,15 +65,15 @@ CYAN   = "#16A085"
 
 # Fault class color mapping (9 classes)
 FAULT_COLORS = {
-    0: GREEN,      # Normal
-    1: RED,        # Thrust Bearing NDE-1 (real fault)
-    2: AMBER,      # Bearing Wear
-    3: BLUE,       # Shaft Imbalance
-    4: PURPLE,     # Misalignment
-    5: CYAN,       # Cavitation
-    6: ORANGE,     # Seal Degradation
-    7: GOLD,       # Gearbox Gear Wear
-    8: "#E74C3C",  # Motor Bearing Fault
+    0: GREEN,
+    1: RED,
+    2: AMBER,
+    3: BLUE,
+    4: PURPLE,
+    5: CYAN,
+    6: ORANGE,
+    7: GOLD,
+    8: "#E74C3C",
 }
 
 # Risk level color mapping
@@ -115,6 +115,8 @@ st.markdown("""
                    font-size: 11px; font-weight: 600; margin: 2px; }
     .onset-card { padding: 12px; border-radius: 6px; margin-bottom: 10px;
                   border-left: 4px solid; }
+    /* Hide all metric delta indicators (arrows + colored text) */
+    [data-testid="stMetricDelta"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,7 +136,6 @@ def load_predictions() -> Optional[pd.DataFrame]:
 
 @st.cache_data(show_spinner=False)
 def load_fault_class_names() -> dict:
-    """Load fault class names from training artifacts."""
     path = MODELS_DIR / "fault_class_names.json"
     if not path.exists():
         return {
@@ -155,25 +156,16 @@ def load_fault_class_names() -> dict:
 
 @st.cache_data(show_spinner=False)
 def load_fault_onset_predictions() -> Optional[dict]:
-    """
-    Load next fault onset predictions generated during training.
-    File: outputs/fault_onset_predictions.json
-    """
     path = OUTPUT_DIR / "fault_onset_predictions.json"
     if not path.exists():
         return None
     with open(path) as f:
         data = json.load(f)
-    # Convert string keys back to int
     return {int(k): v for k, v in data.items()}
 
 
 @st.cache_data(show_spinner=False)
 def load_raw_sensor_data() -> Optional[pd.DataFrame]:
-    """
-    Load sensor time-series for trend plots.
-    Tries augmented data first, falls back to real data.
-    """
     augmented_path = DATA_DIR / "Augmented_DCS_Data.xlsx"
 
     if augmented_path.exists():
@@ -247,10 +239,6 @@ def add_vertical_marker(
     row: Optional[int] = None,
     col: Optional[int] = None,
 ):
-    """
-    Add a vertical line marker using add_shape + add_annotation.
-    Avoids the add_vline() TypeError with datetime axes.
-    """
     if isinstance(x, pd.Timestamp):
         x = x.to_pydatetime()
 
@@ -401,20 +389,16 @@ def tab_health_monitor(preds_df):
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
-        st.metric("Health Index", f"{health_idx:.3f}",
-                  delta="↑ Degrading" if health_idx > 0.5 else "↓ Normal",
-                  delta_color="inverse")
+        st.metric("Health Index", f"{health_idx:.3f}")
     with c2:
-        st.metric("Detected Fault", fault_class_name[:20],
-                  delta=f"Class {xgb_fault_class}")
+        st.metric("Detected Fault", fault_class_name[:20])
     with c3:
-        st.metric("Ensemble Votes", f"{votes}/3",
-                  delta=f"Score: {latest.get('ensemble_score', 0):.3f}")
+        st.metric("Ensemble Votes", f"{votes}/3")
     with c4:
         st.metric("LSTM Recon Error",
                   f"{latest.get('lstm_recon_error', 0):.5f}")
     with c5:
-        st.metric("IF Anomaly Score",
+        st.metric("Anomaly Score",
                   f"{latest.get('if_score', 0):.3f}")
     with c6:
         st.metric("XGB Fault Prob",
@@ -755,24 +739,16 @@ def tab_model_performance(metrics_df):
         ens = metrics_df.loc["XGBoost"]
         c1, c2, c3, c4, c5 = st.columns(5)
         metrics_display = [
-            (c1, "Recall",    "recall",             0.90,    True),
-            (c2, "Precision", "precision",           TARGET_PRECISION, True),
-            (c3, "ROC-AUC",   "roc_auc",            TARGET_ROC_AUC,   True),
-            (c4, "F1 Score",  "f1",                  0.90,             True),
-            (c5, "FPR",       "false_positive_rate", TARGET_MAX_FPR,   False),
+            (c1, "Recall",    "recall"),
+            (c2, "Precision", "precision"),
+            (c3, "ROC-AUC",   "roc_auc"),
+            (c4, "F1 Score",  "f1"),
+            (c5, "FPR",       "false_positive_rate"),
         ]
-        for col, label, key, tgt, higher in metrics_display:
+        for col, label, key in metrics_display:
             val = ens.get(key, None)
             if val is not None and str(val) != "nan":
-                val = float(val)
-                if higher:
-                    delta  = "✓ Target Met" if val >= tgt else f"✗ Need ≥{tgt}"
-                    dcolor = "normal" if val >= tgt else "inverse"
-                else:
-                    delta  = "✓ Target Met" if val <= tgt else f"✗ Need ≤{tgt}"
-                    dcolor = "normal" if val <= tgt else "inverse"
-                col.metric(f"XGBoost {label}", f"{val:.4f}",
-                           delta=delta, delta_color=dcolor)
+                col.metric(f"XGBoost {label}", f"{float(val):.4f}")
 
     st.markdown("---")
 
@@ -879,7 +855,7 @@ def tab_feature_importance(fi_df):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Tab 6 — RUL & Next Fault Onset (COMPLETE)
+# Tab 6 — RUL & Next Fault Onset
 # ═════════════════════════════════════════════════════════════════════════════
 
 def tab_rul(preds_df, rul_info):
@@ -896,116 +872,16 @@ def tab_rul(preds_df, rul_info):
     fault_class_names  = load_fault_class_names()
     fault_onset_preds  = load_fault_onset_predictions()
 
-    # ── Three sub-tabs ────────────────────────────────────────────────────────
-    t1, t2, t3 = st.tabs([
-        "📈 RUL — Bearing Degradation",
+    t1, t2 = st.tabs([
         "🔮 Next Fault Onset (All Classes)",
         "📋 Maintenance Schedule",
     ])
 
     # ═════════════════════════════════════════════════════════════════════════
-    # SUB-TAB 1 — LSTM RUL
+    # SUB-TAB 1 — NEXT FAULT ONSET (ALL 9 CLASSES)
     # ═════════════════════════════════════════════════════════════════════════
 
     with t1:
-        st.markdown("####  LSTM Reconstruction Error — Real Fault Progression")
-        st.caption("Based on actual pump data (Class 1: Thrust Bearing NDE-1)")
-
-        if rul_info:
-            rul_hours = rul_info.get("rul_hours", None)
-            slope     = rul_info.get("trend_slope", 0)
-            msg       = rul_info.get("message", "")
-
-            c1, c2, c3, c4 = st.columns(4)
-            if rul_hours is not None and rul_hours > 0:
-                c1.metric("Estimated RUL", f"{rul_hours:.0f} h",
-                          delta=f"~{rul_hours/24:.1f} days")
-            elif rul_hours == 0:
-                c1.metric("Estimated RUL", "CRITICAL",
-                          delta="⚠ Failure imminent", delta_color="inverse")
-            else:
-                c1.metric("Estimated RUL", "Stable",
-                          delta="No upward trend")
-            c2.metric("Degradation Slope", f"{slope:.6f}/win")
-            c3.metric("Current Error",
-                      f"{rul_info.get('current_error', 0):.5f}")
-            c4.metric("Critical Threshold",
-                      f"{rul_info.get('critical_threshold', 0):.5f}")
-
-            if rul_hours is not None and rul_hours < 48:
-                st.markdown(f"""
-                <div class='fault-alert'>
-                    <b>⚠ CRITICAL — &lt;48 h RUL remaining!</b><br>{msg}
-                </div>
-                """, unsafe_allow_html=True)
-
-        if "lstm_recon_error" in preds_df.columns:
-            fig_rul = go.Figure()
-            fault_onset = pd.Timestamp(FAULT_ONSET_DATE)
-            nm = preds_df["true_label"] == 0
-            fm = preds_df["true_label"] == 1
-
-            fig_rul.add_trace(go.Scatter(
-                x=preds_df[nm]["timestamp"],
-                y=preds_df[nm]["lstm_recon_error"],
-                name="Normal Phase", line=dict(color=TEAL, width=1.5),
-            ))
-            fig_rul.add_trace(go.Scatter(
-                x=preds_df[fm]["timestamp"],
-                y=preds_df[fm]["lstm_recon_error"],
-                name="Fault Phase", line=dict(color=RED, width=2),
-                fill="tozeroy", fillcolor="rgba(204,0,0,0.08)",
-            ))
-
-            if fm.any():
-                ferr  = preds_df[fm]["lstm_recon_error"].values
-                x_idx = np.arange(len(ferr))
-                if len(x_idx) > 1:
-                    sl, ic = np.polyfit(x_idx, ferr, 1)
-                    trend  = sl * x_idx + ic
-                    n_fut  = 20
-                    x_fut  = np.arange(len(ferr), len(ferr) + n_fut)
-                    ts_last = preds_df[fm]["timestamp"].iloc[-1]
-                    fut_ts  = pd.date_range(ts_last, periods=n_fut + 1, freq="12H")[1:]
-                    fut_err = sl * x_fut + ic
-
-                    fig_rul.add_trace(go.Scatter(
-                        x=list(preds_df[fm]["timestamp"]) + list(fut_ts),
-                        y=list(trend) + list(fut_err),
-                        name="Trend + Forecast",
-                        line=dict(color=AMBER, width=2, dash="dash"),
-                    ))
-
-            if rul_info and rul_info.get("critical_threshold"):
-                fig_rul.add_hline(
-                    y=rul_info["critical_threshold"],
-                    line_dash="dot", line_color=RED,
-                    annotation_text="Critical Threshold",
-                )
-
-            add_vertical_marker(fig_rul, x=fault_onset,
-                                color=RED, text="Fault Onset", width=1.5)
-            fig_rul.update_layout(
-                title="LSTM Reconstruction Error — Bearing Degradation Trajectory",
-                xaxis_title="Date", yaxis_title="Reconstruction MSE",
-                template="plotly_white", height=420,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            )
-            st.plotly_chart(fig_rul, use_container_width=True)
-
-        st.info("""
-        **About This Chart:**
-        - Normal Phase (teal) = baseline LSTM reconstruction error
-        - Fault Phase (red) = error during confirmed bearing failure
-        - Orange dashed = extrapolated trend + 20-window forecast
-        - RUL = estimated hours before error crosses 2× baseline threshold
-        """)
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # SUB-TAB 2 — NEXT FAULT ONSET (ALL 9 CLASSES)
-    # ═════════════════════════════════════════════════════════════════════════
-
-    with t2:
         st.markdown("####  Next Fault Onset — All 9 Classes")
         st.caption(
             "Predicted onset dates extrapolated from XGBoost class probability "
@@ -1027,10 +903,8 @@ def tab_rul(preds_df, rul_info):
             ```
             """)
         else:
-            # ── Top KPI row ───────────────────────────────────────────────────
             st.markdown("#####  Risk Summary")
 
-            # Find highest-risk non-normal class
             non_normal = {
                 k: v for k, v in fault_onset_preds.items() if int(k) > 0
             }
@@ -1044,18 +918,13 @@ def tab_rul(preds_df, rul_info):
 
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 
-            # Highest risk fault
             if sorted_by_risk:
                 top_fc, top_pred = sorted_by_risk[0]
                 kpi1.metric(
                     "Highest Risk Fault",
                     top_pred["fault_name"][:22],
-                    delta=f"Class {top_fc} — {top_pred.get('risk_level','?')}",
-                    delta_color="inverse" if top_pred.get("risk_level") in
-                    ["Critical", "High"] else "normal",
                 )
 
-            # Next predicted onset
             future_preds = [
                 (k, v) for k, v in sorted_by_risk
                 if v.get("days_until_onset") is not None
@@ -1068,10 +937,8 @@ def tab_rul(preds_df, rul_info):
                 kpi2.metric(
                     "Next Onset In",
                     f"{next_v['days_until_onset']:.0f} days",
-                    delta=next_v["fault_name"][:22],
                 )
 
-            # Classes with rising trend
             rising = sum(
                 1 for v in fault_onset_preds.values()
                 if v.get("trend_slope", 0) > 0.001
@@ -1079,11 +946,8 @@ def tab_rul(preds_df, rul_info):
             kpi3.metric(
                 "Rising Probability Trends",
                 f"{rising} / 9 classes",
-                delta="Monitor closely" if rising > 3 else "Stable",
-                delta_color="inverse" if rising > 3 else "normal",
             )
 
-            # Overall risk
             critical_count = sum(
                 1 for v in fault_onset_preds.values()
                 if v.get("risk_level") == "Critical"
@@ -1095,13 +959,10 @@ def tab_rul(preds_df, rul_info):
             kpi4.metric(
                 "Critical / High Risk",
                 f"{critical_count} / {high_count}",
-                delta="Immediate action needed" if critical_count > 0 else "Manageable",
-                delta_color="inverse" if critical_count > 0 else "normal",
             )
 
             st.markdown("---")
 
-            # ── Fault class cards (3-column grid) ─────────────────────────────
             st.markdown("#####  Per-Class Fault Onset Cards")
 
             cols3 = st.columns(3)
@@ -1155,7 +1016,6 @@ def tab_rul(preds_df, rul_info):
                 </div>
                 """, unsafe_allow_html=True)
 
-            # Add Class 0 (Normal) card
             if 0 in fault_onset_preds:
                 pred0 = fault_onset_preds[0]
                 st.markdown(f"""
@@ -1173,7 +1033,6 @@ def tab_rul(preds_df, rul_info):
 
             st.markdown("---")
 
-            # ── Probability trend chart ───────────────────────────────────────
             st.markdown("#####  Fault Class Probability Trends (Last 50 Windows)")
 
             prob_cols_avail = [
@@ -1188,7 +1047,7 @@ def tab_rul(preds_df, rul_info):
                 for pc in prob_cols_avail:
                     fc_idx = int(pc.split("_")[-1])
                     if fc_idx == 0:
-                        continue  # Skip normal in trend chart
+                        continue
                     fig_trends.add_trace(go.Scatter(
                         x=recent_50["timestamp"],
                         y=recent_50[pc],
@@ -1215,7 +1074,6 @@ def tab_rul(preds_df, rul_info):
                 )
                 st.plotly_chart(fig_trends, use_container_width=True)
 
-            # ── Predicted onset timeline chart ────────────────────────────────
             st.markdown("#####  Predicted Fault Onset Timeline")
 
             timeline_rows = []
@@ -1266,14 +1124,12 @@ def tab_rul(preds_df, rul_info):
                         ),
                     ))
 
-                # Mark "now" (last prediction timestamp)
                 add_vertical_marker(
                     fig_tl,
                     x=preds_df["timestamp"].max(),
                     text="Now",
                     color=NAVY, dash="dash", width=2,
                 )
-                # Mark real fault onset
                 add_vertical_marker(
                     fig_tl,
                     x=pd.Timestamp(FAULT_ONSET_DATE),
@@ -1299,7 +1155,6 @@ def tab_rul(preds_df, rul_info):
                 (healthy operation), or the model needs more fault data.
                 """)
 
-            # ── Bar chart: current probability vs risk threshold ───────────────
             st.markdown("#####  Current Risk Level — All Fault Classes")
 
             bar_classes = [int(k) for k in fault_onset_preds.keys() if int(k) > 0]
@@ -1334,10 +1189,10 @@ def tab_rul(preds_df, rul_info):
             st.plotly_chart(fig_bar, use_container_width=True)
 
     # ═════════════════════════════════════════════════════════════════════════
-    # SUB-TAB 3 — MAINTENANCE SCHEDULE
+    # SUB-TAB 2 — MAINTENANCE SCHEDULE
     # ═════════════════════════════════════════════════════════════════════════
 
-    with t3:
+    with t2:
         st.markdown("#### AI Generated Maintenance Schedule")
         st.caption("Prioritised by risk level and predicted onset date")
 
@@ -1352,7 +1207,7 @@ def tab_rul(preds_df, rul_info):
         for fc, pred in fault_onset_preds.items():
             fc = int(fc)
             if fc == 0:
-                continue  # Skip normal class
+                continue
 
             days      = pred.get("days_until_onset")
             onset_raw = pred.get("predicted_onset")
@@ -1411,7 +1266,6 @@ def tab_rul(preds_df, rul_info):
             height=520,
         )
 
-        # Download
         csv_sched = sched_df.drop(columns=["Priority"]).to_csv(index=False)
         st.download_button(
             "⬇️ Download Maintenance Schedule (CSV)",
@@ -1421,7 +1275,7 @@ def tab_rul(preds_df, rul_info):
         )
 
         st.markdown("---")
-       
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Tab 7 — Data Explorer
@@ -1615,7 +1469,6 @@ def main():
         fi_df          = load_feature_importance()
         rul_info       = load_rul()
         sensor_summary = load_sensor_summary()
-        # fault_onset_preds loaded inside tab_rul() via cached loader
 
     tabs = st.tabs([
         "⚙️ Health Monitor",
