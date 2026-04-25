@@ -737,18 +737,23 @@ def tab_model_performance(metrics_df):
 
     if "XGBoost" in metrics_df.index:
         ens = metrics_df.loc["XGBoost"]
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         metrics_display = [
             (c1, "Recall",    "recall"),
             (c2, "Precision", "precision"),
             (c3, "ROC-AUC",   "roc_auc"),
             (c4, "F1 Score",  "f1"),
             (c5, "FPR",       "false_positive_rate"),
+            (c6, "Accuracy",  "accuracy"),
+            (c7, "MSE",       "mse"),
         ]
         for col, label, key in metrics_display:
             val = ens.get(key, None)
             if val is not None and str(val) != "nan":
-                col.metric(f"XGBoost {label}", f"{float(val):.4f}")
+                if key == "mse":
+                    col.metric(f"XGBoost {label}", f"{float(val):.6f}")
+                else:
+                    col.metric(f"XGBoost {label}", f"{float(val):.4f}")
 
     st.markdown("---")
 
@@ -785,17 +790,26 @@ def tab_model_performance(metrics_df):
             st.plotly_chart(fig_radar, use_container_width=True)
         with col2:
             st.markdown("#### Full Metrics Table")
-            disp_cols = ["recall", "precision", "f1", "roc_auc",
+            disp_cols = ["accuracy", "mse", "recall", "precision", "f1", "roc_auc",
                          "false_positive_rate", "TP", "FP", "TN", "FN"]
             avail = [c for c in disp_cols if c in metrics_df.columns]
+            fmt_cols = {c: "{:.4f}" for c in ["accuracy", "mse", "recall", "precision", "f1",
+                                              "roc_auc", "false_positive_rate"]}
+            table_df = metrics_df.drop(index=["LSTM Autoencoder"], errors="ignore")
             st.dataframe(
-                metrics_df[avail].style.format(
-                    {c: "{:.4f}" for c in ["recall", "precision", "f1",
-                                            "roc_auc", "false_positive_rate"]}
-                ).highlight_max(
-                    subset=["recall", "precision", "f1"],
-                    color="rgba(0,135,122,0.2)",
-                ),
+                table_df[avail].style.format(fmt_cols)
+                    .highlight_max(
+                        subset=["accuracy"],
+                        color="rgba(0,135,122,0.2)",
+                    )
+                    .highlight_min(
+                        subset=["mse"],
+                        color="rgba(0,135,122,0.2)",
+                    )
+                    .highlight_max(
+                        subset=["recall", "precision", "f1"],
+                        color="rgba(0,135,122,0.2)",
+                    ),
                 use_container_width=True,
             )
 
