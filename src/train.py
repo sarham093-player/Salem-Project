@@ -865,6 +865,7 @@ def predict_next_fault_onsets(
 def evaluate_models(preds_df: pd.DataFrame) -> pd.DataFrame:
     """Compute evaluation metrics for all models."""
     from sklearn.metrics import (
+        accuracy_score, mean_squared_error,
         recall_score, precision_score, f1_score,
         roc_auc_score, confusion_matrix,
     )
@@ -891,6 +892,8 @@ def evaluate_models(preds_df: pd.DataFrame) -> pd.DataFrame:
             tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
             
             rows[name] = {
+                "accuracy":            accuracy_score(y_true, y_pred),
+                "mse":                 mean_squared_error(y_true, y_pred),
                 "recall":              recall_score(y_true, y_pred, zero_division=0),
                 "precision":           precision_score(y_true, y_pred, zero_division=0),
                 "f1":                  f1_score(y_true, y_pred, zero_division=0),
